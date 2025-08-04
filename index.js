@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
 
 const GUILD_ID = process.env.GUILD_ID;
 const PORT = process.env.PORT || 3000;
@@ -27,8 +29,19 @@ const client = new Client({
 });
 
 const app = express();
+const server = createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+        methods: ["GET", "POST"]
+    }
+});
+
+const clientSubscriptions = new Map();
 
 app.use(express.json({ limit: '10mb' }));
+
+app.use('/examples', express.static('examples'));
 
 if (process.env.NODE_ENV !== 'production') {
     app.use((req, res, next) => {
@@ -42,6 +55,185 @@ client.once('ready', () => {
     console.log(`Connected to ${client.guilds.cache.size} guild(s)`);
     console.log(`Cached ${client.users.cache.size} user(s)`);
     console.log('Bot is ready!');
+});
+
+io.on('connection', (socket) => {
+    console.log(`Client connected: ${socket.id}`);
+
+    socket.on('subscribe', async (userId) => {
+        if (!/^\d{17,19}$/.test(userId)) {
+            socket.emit('error', {
+                message: 'Invalid user ID format',
+                code: 'INVALID_FORMAT',
+                userId: userId
+            });
+            return;
+        }
+
+        try {
+            const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
+            const member = guild.members.cache.get(userId) || await guild.members.fetch(userId);
+
+            clientSubscriptions.set(socket.id, userId);
+            socket.join(`user:${userId}`);
+            console.log(`Client ${socket.id} subscribed to user ${userId}`);
+
+            sendUserData(userId, socket);
+        } catch (error) {
+            if (error.code === 10013 || error.status === 404) {
+                socket.emit('error', {
+                    message: 'User not found in this guild',
+                    code: 'USER_NOT_FOUND',
+                    userId: userId
+                });
+            } else {
+                socket.emit('error', {
+                    message: 'Failed to validate user',
+                    code: 'VALIDATION_ERROR',
+                    userId: userId
+                });
+            }
+            console.error(`Failed to subscribe client ${socket.id} to user ${userId}:`, error.message);
+        }
+    });
+
+    socket.on('unsubscribe', () => {
+        const userId = clientSubscriptions.get(socket.id);
+        if (userId) {
+            socket.leave(`user:${userId}`);
+            clientSubscriptions.delete(socket.id);
+            console.log(`Client ${socket.id} unsubscribed from user ${userId}`);
+        }
+    });
+
+    socket.on('disconnect', () => {
+        const userId = clientSubscriptions.get(socket.id);
+        if (userId) {
+            clientSubscriptions.delete(socket.id);
+        }
+        console.log(`Client disconnected: ${socket.id}`);
+    });
+});
+
+const formatUserData = (user, member, presence) => {
+    const userData = {
+        username: user.username,
+        globalName: user.globalName,
+        displayName: member.displayName,
+        tag: user.tag,
+        id: user.id,
+        status: presence?.status || 'offline',
+        avatarUrl: user.displayAvatarURL({ dynamic: true, size: 512 }),
+        customStatus: null,
+        activities: [],
+        createdAt: user.createdTimestamp,
+        flags: user.flags?.toArray() || [],
+        premiumSince: member.premiumSinceTimestamp,
+    };
+
+    if (presence?.activities?.length > 0) {
+        const customStatusActivity = presence.activities.find(a => a.type === 4);
+        if (customStatusActivity && !userData.customStatus) {
+            userData.customStatus = {
+                emoji: customStatusActivity.emoji ? {
+                    name: customStatusActivity.emoji.name,
+                    id: customStatusActivity.emoji.id,
+                    animated: customStatusActivity.emoji.animated || false
+                } : null,
+                state: customStatusActivity.state
+            };
+        }
+
+        userData.activities = presence.activities
+            .filter(activity => activity.type !== 4)
+            .map(activity => {
+                const baseActivity = {
+                    name: activity.name,
+                    type: activity.type,
+                    typeName: getActivityTypeName(activity.type),
+                    details: activity.details || null,
+                    state: activity.state || null,
+                    timestamps: activity.timestamps ? {
+                        start: activity.timestamps.start,
+                        end: activity.timestamps.end
+                    } : null,
+                    applicationId: activity.applicationId || null,
+                    url: activity.url || null
+                };
+
+                if (activity.name === 'Spotify' && activity.type === 2) {
+                    baseActivity.artist = activity.state;
+                    baseActivity.song = activity.details;
+                    baseActivity.album = activity.assets?.largeText || null;
+                    baseActivity.albumArt = activity.assets?.largeImage ?
+                        `https://i.scdn.co/image/${activity.assets.largeImage.replace('spotify:', '')}` : null;
+                }
+
+                return baseActivity;
+            });
+    }
+
+    return userData;
+};
+
+const sendUserData = async (userId, socket = null) => {
+    try {
+        const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
+        const member = guild.members.cache.get(userId) || await guild.members.fetch(userId);
+        const user = member.user;
+        const presence = guild.presences.cache.get(userId);
+
+        const userData = formatUserData(user, member, presence);
+
+        if (socket) {
+            socket.emit('userUpdate', userData);
+        } else {
+            io.to(`user:${userId}`).emit('userUpdate', userData);
+        }
+    } catch (error) {
+        console.error(`Error sending user data for ${userId}:`, error.message);
+
+        if (socket) {
+            if (error.code === 10013 || error.status === 404) {
+                socket.emit('error', {
+                    message: 'User not found in this guild',
+                    code: 'USER_NOT_FOUND',
+                    userId: userId
+                });
+            } else {
+                socket.emit('error', {
+                    message: 'Failed to fetch user data',
+                    code: 'FETCH_ERROR',
+                    userId: userId
+                });
+            }
+        }
+    }
+};
+
+client.on('presenceUpdate', (oldPresence, newPresence) => {
+    if (!newPresence || newPresence.guild.id !== GUILD_ID) return;
+
+    const userId = newPresence.userId;
+    if (io.sockets.adapter.rooms.has(`user:${userId}`)) {
+        sendUserData(userId);
+    }
+});
+
+client.on('userUpdate', (oldUser, newUser) => {
+    const userId = newUser.id;
+    if (io.sockets.adapter.rooms.has(`user:${userId}`)) {
+        sendUserData(userId);
+    }
+});
+
+client.on('guildMemberUpdate', (oldMember, newMember) => {
+    if (newMember.guild.id !== GUILD_ID) return;
+
+    const userId = newMember.id;
+    if (io.sockets.adapter.rooms.has(`user:${userId}`)) {
+        sendUserData(userId);
+    }
 });
 
 const getActivityTypeName = (type) => ACTIVITY_TYPES[type] || 'Unknown';
@@ -64,7 +256,7 @@ app.get('/user/:userId', async (req, res) => {
     }
 
     try {
-        const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID)
+        const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
 
         let member;
         try {
@@ -79,62 +271,7 @@ app.get('/user/:userId', async (req, res) => {
         const user = member.user;
         const presence = guild.presences.cache.get(userId);
 
-        const response = {
-            username: user.username,
-            globalName: user.globalName,
-            displayName: member.displayName,
-            tag: user.tag,
-            id: user.id,
-            status: presence?.status || 'offline',
-            avatarUrl: user.displayAvatarURL({ dynamic: true, size: 512 }),
-            customStatus: null,
-            activities: [],
-            createdAt: user.createdTimestamp,
-            flags: user.flags?.toArray() || [],
-            premiumSince: member.premiumSinceTimestamp,
-        };
-
-        if (presence?.activities?.length > 0) {
-            const customStatusActivity = presence.activities.find(a => a.type === 4);
-            if (customStatusActivity && !response.customStatus) {
-                response.customStatus = {
-                    emoji: customStatusActivity.emoji ? {
-                        name: customStatusActivity.emoji.name,
-                        id: customStatusActivity.emoji.id,
-                        animated: customStatusActivity.emoji.animated || false
-                    } : null,
-                    state: customStatusActivity.state
-                };
-            }
-
-            response.activities = presence.activities
-                .filter(activity => activity.type !== 4)
-                .map(activity => {
-                    const baseActivity = {
-                        name: activity.name,
-                        type: activity.type,
-                        typeName: getActivityTypeName(activity.type),
-                        details: activity.details || null,
-                        state: activity.state || null,
-                        timestamps: activity.timestamps ? {
-                            start: activity.timestamps.start,
-                            end: activity.timestamps.end
-                        } : null,
-                        applicationId: activity.applicationId || null,
-                        url: activity.url || null
-                    };
-
-                    if (activity.name === 'Spotify' && activity.type === 2) {
-                        baseActivity.artist = activity.state;
-                        baseActivity.song = activity.details;
-                        baseActivity.album = activity.assets?.largeText || null;
-                        baseActivity.albumArt = activity.assets?.largeImage ?
-                            `https://i.scdn.co/image/${activity.assets.largeImage.replace('spotify:', '')}` : null;
-                    }
-
-                    return baseActivity;
-                });
-        }
+        const response = formatUserData(user, member, presence);
 
         res.json(response);
 
@@ -222,10 +359,11 @@ process.on('uncaughtException', (error) => {
     gracefulShutdown();
 });
 
-const server = app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Discord Bot API server is running on port ${PORT}`);
     console.log(`Health check available at: http://localhost:${PORT}/health`);
     console.log(`User endpoint available at: http://localhost:${PORT}/user/:userId`);
+    console.log(`WebSocket server is running on the same port`);
 });
 
 client.login(process.env.DISCORD_BOT_TOKEN).catch(error => {
