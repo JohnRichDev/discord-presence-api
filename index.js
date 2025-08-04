@@ -41,8 +41,6 @@ const clientSubscriptions = new Map();
 
 app.use(express.json({ limit: '10mb' }));
 
-app.use('/examples', express.static('examples'));
-
 if (process.env.NODE_ENV !== 'production') {
     app.use((req, res, next) => {
         console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
