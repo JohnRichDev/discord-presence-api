@@ -23,6 +23,11 @@
   "dependencies": {
     "discord.js": "^14.21.0",
     "dotenv": "^17.2.1",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "axios": "^1.6.0",
+    "socket.io-client": "^4.8.1"
   }
 }
