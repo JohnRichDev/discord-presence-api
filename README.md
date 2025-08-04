@@ -1,14 +1,26 @@
 # Discord Bot API Server
 
-A lightweight Express.js server that exposes Discord user status and activity data through RESTful endpoints.
+A lightweight Express.js server that exposes Discord user status and activity data through RESTful endpoints and real-time WebSocket connections.
 
 ## Features
 
 - Retrieve detailed Discord user presence and activity information
+- Real-time WebSocket connections for instant presence updates
 - Health check endpoint for monitoring server and bot status
-- Real-time data updates via the Discord Gateway
+- Subscription-based user monitoring system
 
 ## API Endpoints
+
+### WebSocket Connection
+
+Connect to `ws://localhost:3000` for real-time presence updates.
+
+**WebSocket Events:**
+
+- **Client → Server**: `subscribe(userId)` - Subscribe to user presence updates
+- **Client → Server**: `unsubscribe()` - Unsubscribe from current user
+- **Server → Client**: `userUpdate(userData)` - Real-time user data updates
+- **Server → Client**: `error(message)` - Connection or validation errors
 
 ### GET `/user/:userId`
 
@@ -107,6 +119,33 @@ npm start
 
 The server will run on port `3000` by default (or the value defined in `.env`).
 
+## WebSocket Integration
+
+### Real-time Connection Setup
+
+For real-time updates instead of polling the REST API, connect to the WebSocket server:
+
+```javascript
+// Using socket.io-client in your web application
+import io from 'socket.io-client';
+
+const socket = io('http://localhost:3000');
+
+// Subscribe to user presence updates
+socket.emit('subscribe', '123456789012345678');
+
+// Listen for real-time updates
+socket.on('userUpdate', (userData) => {
+  console.log('User status updated:', userData);
+  // Update your UI with new data
+});
+
+// Handle connection events
+socket.on('connect', () => console.log('Connected to Discord presence server'));
+socket.on('disconnect', () => console.log('Disconnected from server'));
+socket.on('error', (error) => console.error('WebSocket error:', error));
+```
+
 ## Example API Usage
 
 ### Get User Information
@@ -200,14 +239,24 @@ curl http://localhost:3000/health
 
 ## Error Handling
 
+### REST API Errors
+
 - `404 Not Found`: User not found in the guild
 - `500 Internal Server Error`: Unexpected server error
 - `503 Service Unavailable`: Bot is not connected or not ready
+
+### WebSocket Connection Issues
+
+- **Invalid User ID**: WebSocket will emit error event with validation message
+- **User Not Found**: Bot cannot find user in the configured guild
+- **Connection Lost**: Client should implement reconnection logic
+- **CORS Issues**: Ensure `CORS_ORIGIN` environment variable includes your domain
 
 ## Dependencies
 
 - `discord.js`: Discord API client
 - `express`: Web server framework
+- `socket.io`: Real-time WebSocket communication
 - `dotenv`: Environment variable loader
 
 ## Contributing
