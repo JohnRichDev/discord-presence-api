@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
@@ -31,6 +33,7 @@ const client = new Client({
 });
 
 const app = express();
+
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
@@ -41,7 +44,34 @@ const io = new Server(server, {
 
 const clientSubscriptions = new Map();
 
+const guildCache = new Map();
+const userDataCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, value] of userDataCache.entries()) {
+        if (now - value.timestamp > CACHE_TTL) {
+            userDataCache.delete(key);
+        }
+    }
+}, 60 * 1000);
+
+app.use(compression());
 app.use(express.json({ limit: '10mb' }));
+
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: {
+        error: 'Too many requests',
+        details: 'Please try again later'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+app.use('/user', limiter);
 
 if (process.env.NODE_ENV !== 'production') {
     app.use((req, res, next) => {
@@ -71,8 +101,8 @@ io.on('connection', (socket) => {
         }
 
         try {
-            const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
-            const member = guild.members.cache.get(userId) || await guild.members.fetch(userId);
+            const guild = await getGuild();
+            const member = await getMember(guild, userId);
 
             clientSubscriptions.set(socket.id, userId);
             socket.join(`user:${userId}`);
@@ -80,7 +110,7 @@ io.on('connection', (socket) => {
 
             sendUserData(userId, socket);
         } catch (error) {
-            if (error.code === DISCORD_UNKNOWN_USER_ERROR_CODE || error.status === 404) {
+            if (error.message === 'USER_NOT_FOUND') {
                 socket.emit('error', {
                     message: 'User not found in this guild',
                     code: 'USER_NOT_FOUND',
@@ -114,6 +144,27 @@ io.on('connection', (socket) => {
         console.log(`Client disconnected: ${socket.id}`);
     });
 });
+
+const getGuild = async () => {
+    if (guildCache.has(GUILD_ID)) {
+        return guildCache.get(GUILD_ID);
+    }
+    
+    const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
+    guildCache.set(GUILD_ID, guild);
+    return guild;
+};
+
+const getMember = async (guild, userId) => {
+    try {
+        return guild.members.cache.get(userId) || await guild.members.fetch(userId);
+    } catch (error) {
+        if (error.code === DISCORD_UNKNOWN_USER_ERROR_CODE || error.status === 404) {
+            throw new Error('USER_NOT_FOUND');
+        }
+        throw error;
+    }
+};
 
 const formatUserData = (user, member, presence) => {
     const userData = {
@@ -178,12 +229,30 @@ const formatUserData = (user, member, presence) => {
 
 const sendUserData = async (userId, socket = null) => {
     try {
-        const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
-        const member = guild.members.cache.get(userId) || await guild.members.fetch(userId);
+        const cacheKey = `user:${userId}`;
+        const now = Date.now();
+        const cached = userDataCache.get(cacheKey);
+        
+        if (cached && (now - cached.timestamp) < CACHE_TTL) {
+            if (socket) {
+                socket.emit('userUpdate', cached.data);
+            } else {
+                io.to(`user:${userId}`).emit('userUpdate', cached.data);
+            }
+            return;
+        }
+
+        const guild = await getGuild();
+        const member = await getMember(guild, userId);
         const user = member.user;
         const presence = guild.presences.cache.get(userId);
 
         const userData = formatUserData(user, member, presence);
+        
+        userDataCache.set(cacheKey, {
+            data: userData,
+            timestamp: now
+        });
 
         if (socket) {
             socket.emit('userUpdate', userData);
@@ -194,7 +263,7 @@ const sendUserData = async (userId, socket = null) => {
         console.error(`Error sending user data for ${userId}:`, error.message);
 
         if (socket) {
-            if (error.code === DISCORD_UNKNOWN_USER_ERROR_CODE || error.status === 404) {
+            if (error.message === 'USER_NOT_FOUND') {
                 socket.emit('error', {
                     message: 'User not found in this guild',
                     code: 'USER_NOT_FOUND',
@@ -211,19 +280,37 @@ const sendUserData = async (userId, socket = null) => {
     }
 };
 
+const updateDebounceMap = new Map();
+const DEBOUNCE_DELAY = 1000;
+
+const debouncedSendUserData = (userId) => {
+    if (updateDebounceMap.has(userId)) {
+        clearTimeout(updateDebounceMap.get(userId));
+    }
+    
+    const timeoutId = setTimeout(() => {
+        sendUserData(userId);
+        updateDebounceMap.delete(userId);
+    }, DEBOUNCE_DELAY);
+    
+    updateDebounceMap.set(userId, timeoutId);
+};
+
 client.on('presenceUpdate', (oldPresence, newPresence) => {
     if (!newPresence || newPresence.guild.id !== GUILD_ID) return;
 
     const userId = newPresence.userId;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        sendUserData(userId);
+        userDataCache.delete(`user:${userId}`);
+        debouncedSendUserData(userId);
     }
 });
 
 client.on('userUpdate', (oldUser, newUser) => {
     const userId = newUser.id;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        sendUserData(userId);
+        userDataCache.delete(`user:${userId}`);
+        debouncedSendUserData(userId);
     }
 });
 
@@ -232,7 +319,8 @@ client.on('guildMemberUpdate', (oldMember, newMember) => {
 
     const userId = newMember.id;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        sendUserData(userId);
+        userDataCache.delete(`user:${userId}`);
+        debouncedSendUserData(userId);
     }
 });
 
@@ -256,27 +344,38 @@ app.get('/user/:userId', async (req, res) => {
     }
 
     try {
-        const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
-
-        let member;
-        try {
-            member = guild.members.cache.get(userId) || await guild.members.fetch(userId);
-        } catch (fetchError) {
-            return res.status(404).json({
-                error: 'Member not found in this guild',
-                details: 'User may not be a member of the specified guild'
-            });
+        const cacheKey = `user:${userId}`;
+        const now = Date.now();
+        const cached = userDataCache.get(cacheKey);
+        
+        if (cached && (now - cached.timestamp) < CACHE_TTL) {
+            return res.json(cached.data);
         }
 
+        const guild = await getGuild();
+        const member = await getMember(guild, userId);
         const user = member.user;
         const presence = guild.presences.cache.get(userId);
 
         const response = formatUserData(user, member, presence);
+        
+        userDataCache.set(cacheKey, {
+            data: response,
+            timestamp: now
+        });
 
         res.json(response);
 
     } catch (error) {
         console.error('Error fetching user:', error);
+        
+        if (error.message === 'USER_NOT_FOUND') {
+            return res.status(404).json({
+                error: 'Member not found in this guild',
+                details: 'User may not be a member of the specified guild'
+            });
+        }
+        
         res.status(500).json({
             error: 'User not found or error occurred',
             details: error.message
@@ -284,7 +383,17 @@ app.get('/user/:userId', async (req, res) => {
     }
 });
 
+let healthDataCache = null;
+let healthCacheTimestamp = 0;
+const HEALTH_CACHE_TTL = 30 * 1000;
+
 app.get('/health', (req, res) => {
+    const now = Date.now();
+    
+    if (healthDataCache && (now - healthCacheTimestamp) < HEALTH_CACHE_TTL) {
+        return res.json(healthDataCache);
+    }
+    
     const healthData = {
         status: 'online',
         botStatus: client.user?.presence?.status || 'offline',
@@ -299,6 +408,9 @@ app.get('/health', (req, res) => {
             total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
         }
     };
+    
+    healthDataCache = healthData;
+    healthCacheTimestamp = now;
 
     res.json(healthData);
 });
