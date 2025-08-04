@@ -7,6 +7,8 @@ const { Server } = require('socket.io');
 const GUILD_ID = process.env.GUILD_ID;
 const PORT = process.env.PORT || 3000;
 
+const DISCORD_UNKNOWN_USER_ERROR_CODE = 10013;
+
 const ACTIVITY_TYPES = {
     0: 'Playing',
     1: 'Streaming',
@@ -78,7 +80,7 @@ io.on('connection', (socket) => {
 
             sendUserData(userId, socket);
         } catch (error) {
-            if (error.code === 10013 || error.status === 404) {
+            if (error.code === DISCORD_UNKNOWN_USER_ERROR_CODE || error.status === 404) {
                 socket.emit('error', {
                     message: 'User not found in this guild',
                     code: 'USER_NOT_FOUND',
@@ -192,7 +194,7 @@ const sendUserData = async (userId, socket = null) => {
         console.error(`Error sending user data for ${userId}:`, error.message);
 
         if (socket) {
-            if (error.code === 10013 || error.status === 404) {
+            if (error.code === DISCORD_UNKNOWN_USER_ERROR_CODE || error.status === 404) {
                 socket.emit('error', {
                     message: 'User not found in this guild',
                     code: 'USER_NOT_FOUND',
@@ -213,14 +215,14 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
     if (!newPresence || newPresence.guild.id !== GUILD_ID) return;
 
     const userId = newPresence.userId;
-    if (io.sockets.adapter.rooms.has(`user:${userId}`)) {
+    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         sendUserData(userId);
     }
 });
 
 client.on('userUpdate', (oldUser, newUser) => {
     const userId = newUser.id;
-    if (io.sockets.adapter.rooms.has(`user:${userId}`)) {
+    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         sendUserData(userId);
     }
 });
@@ -229,7 +231,7 @@ client.on('guildMemberUpdate', (oldMember, newMember) => {
     if (newMember.guild.id !== GUILD_ID) return;
 
     const userId = newMember.id;
-    if (io.sockets.adapter.rooms.has(`user:${userId}`)) {
+    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         sendUserData(userId);
     }
 });
