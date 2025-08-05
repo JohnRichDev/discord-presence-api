@@ -20,6 +20,30 @@ const ACTIVITY_TYPES = {
     5: 'Competing in'
 };
 
+const deepEqual = (obj1, obj2) => {
+    if (obj1 === obj2) return true;
+
+    if (obj1 == null || obj2 == null) return obj1 === obj2;
+
+    if (typeof obj1 !== typeof obj2) return false;
+
+    if (typeof obj1 !== 'object') return obj1 === obj2;
+
+    if (Array.isArray(obj1) !== Array.isArray(obj2)) return false;
+
+    const keys1 = Object.keys(obj1);
+    const keys2 = Object.keys(obj2);
+
+    if (keys1.length !== keys2.length) return false;
+
+    for (const key of keys1) {
+        if (!keys2.includes(key)) return false;
+        if (!deepEqual(obj1[key], obj2[key])) return false;
+    }
+
+    return true;
+};
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -43,6 +67,7 @@ const io = new Server(server, {
 });
 
 const clientSubscriptions = new Map();
+const clientUpdateFilters = new Map();
 
 const guildCache = new Map();
 const userDataCache = new Map();
@@ -90,7 +115,23 @@ client.once('ready', () => {
 io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
 
-    socket.on('subscribe', async (userId) => {
+    socket.on('subscribe', async (data) => {
+        let userId, updateTypes;
+
+        if (typeof data === 'string') {
+            userId = data;
+            updateTypes = ['all'];
+        } else if (typeof data === 'object' && data.userId) {
+            userId = data.userId;
+            updateTypes = data.updateTypes || ['all'];
+        } else {
+            socket.emit('error', {
+                message: 'Invalid subscription data format',
+                code: 'INVALID_FORMAT'
+            });
+            return;
+        }
+
         if (!/^\d{17,19}$/.test(userId)) {
             socket.emit('error', {
                 message: 'Invalid user ID format',
@@ -100,13 +141,25 @@ io.on('connection', (socket) => {
             return;
         }
 
+        const validUpdateTypes = ['all', 'status', 'avatar', 'username', 'activities', 'customStatus', 'displayName'];
+        const invalidTypes = updateTypes.filter(type => !validUpdateTypes.includes(type));
+        if (invalidTypes.length > 0) {
+            socket.emit('error', {
+                message: `Invalid update types: ${invalidTypes.join(', ')}`,
+                code: 'INVALID_UPDATE_TYPES',
+                validTypes: validUpdateTypes
+            });
+            return;
+        }
+
         try {
             const guild = await getGuild();
             const member = await getMember(guild, userId);
 
             clientSubscriptions.set(socket.id, userId);
+            clientUpdateFilters.set(socket.id, updateTypes);
             socket.join(`user:${userId}`);
-            console.log(`Client ${socket.id} subscribed to user ${userId}`);
+            console.log(`Client ${socket.id} subscribed to user ${userId} with filters: ${updateTypes.join(', ')}`);
 
             sendUserData(userId, socket);
         } catch (error) {
@@ -132,6 +185,7 @@ io.on('connection', (socket) => {
         if (userId) {
             socket.leave(`user:${userId}`);
             clientSubscriptions.delete(socket.id);
+            clientUpdateFilters.delete(socket.id);
             console.log(`Client ${socket.id} unsubscribed from user ${userId}`);
         }
     });
@@ -140,6 +194,7 @@ io.on('connection', (socket) => {
         const userId = clientSubscriptions.get(socket.id);
         if (userId) {
             clientSubscriptions.delete(socket.id);
+            clientUpdateFilters.delete(socket.id);
         }
         console.log(`Client disconnected: ${socket.id}`);
     });
@@ -149,7 +204,7 @@ const getGuild = async () => {
     if (guildCache.has(GUILD_ID)) {
         return guildCache.get(GUILD_ID);
     }
-    
+
     const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
     guildCache.set(GUILD_ID, guild);
     return guild;
@@ -169,8 +224,7 @@ const getMember = async (guild, userId) => {
 const formatUserData = (user, member, presence) => {
     const userData = {
         username: user.username,
-        globalName: user.globalName,
-        displayName: member.displayName,
+        displayName: user.globalName,
         tag: user.tag,
         id: user.id,
         status: presence?.status || 'offline',
@@ -227,17 +281,36 @@ const formatUserData = (user, member, presence) => {
     return userData;
 };
 
-const sendUserData = async (userId, socket = null) => {
+const emitToSubscribedClients = (userId, userData, updateType = null) => {
+    const room = io.sockets.adapter.rooms.get(`user:${userId}`);
+    if (room) {
+        room.forEach(socketId => {
+            const clientSocket = io.sockets.sockets.get(socketId);
+            const updateFilters = clientUpdateFilters.get(socketId);
+
+            if (clientSocket && updateFilters) {
+                if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
+                    clientSocket.emit('userUpdate', {
+                        ...userData,
+                        updateType: updateType || 'all'
+                    });
+                }
+            }
+        });
+    }
+};
+
+const sendUserData = async (userId, socket = null, updateType = null) => {
     try {
         const cacheKey = `user:${userId}`;
         const now = Date.now();
         const cached = userDataCache.get(cacheKey);
-        
+
         if (cached && (now - cached.timestamp) < CACHE_TTL) {
             if (socket) {
                 socket.emit('userUpdate', cached.data);
             } else {
-                io.to(`user:${userId}`).emit('userUpdate', cached.data);
+                emitToSubscribedClients(userId, cached.data, updateType);
             }
             return;
         }
@@ -248,7 +321,7 @@ const sendUserData = async (userId, socket = null) => {
         const presence = guild.presences.cache.get(userId);
 
         const userData = formatUserData(user, member, presence);
-        
+
         userDataCache.set(cacheKey, {
             data: userData,
             timestamp: now
@@ -257,7 +330,7 @@ const sendUserData = async (userId, socket = null) => {
         if (socket) {
             socket.emit('userUpdate', userData);
         } else {
-            io.to(`user:${userId}`).emit('userUpdate', userData);
+            emitToSubscribedClients(userId, userData, updateType);
         }
     } catch (error) {
         console.error(`Error sending user data for ${userId}:`, error.message);
@@ -283,17 +356,18 @@ const sendUserData = async (userId, socket = null) => {
 const updateDebounceMap = new Map();
 const DEBOUNCE_DELAY = 1000;
 
-const debouncedSendUserData = (userId) => {
-    if (updateDebounceMap.has(userId)) {
-        clearTimeout(updateDebounceMap.get(userId));
+const debouncedSendUserData = (userId, updateType = null) => {
+    const key = `${userId}:${updateType || 'all'}`;
+    if (updateDebounceMap.has(key)) {
+        clearTimeout(updateDebounceMap.get(key));
     }
-    
+
     const timeoutId = setTimeout(() => {
-        sendUserData(userId);
-        updateDebounceMap.delete(userId);
+        sendUserData(userId, null, updateType);
+        updateDebounceMap.delete(key);
     }, DEBOUNCE_DELAY);
-    
-    updateDebounceMap.set(userId, timeoutId);
+
+    updateDebounceMap.set(key, timeoutId);
 };
 
 client.on('presenceUpdate', (oldPresence, newPresence) => {
@@ -302,7 +376,37 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
     const userId = newPresence.userId;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         userDataCache.delete(`user:${userId}`);
-        debouncedSendUserData(userId);
+
+        const changes = [];
+
+        if (oldPresence?.status !== newPresence.status) {
+            changes.push('status');
+        }
+
+        const oldActivities = oldPresence?.activities || [];
+        const newActivities = newPresence?.activities || [];
+
+        const oldCustomStatus = oldActivities.find(a => a.type === 4);
+        const newCustomStatus = newActivities.find(a => a.type === 4);
+
+        if (!deepEqual(oldCustomStatus, newCustomStatus)) {
+            changes.push('customStatus');
+        }
+
+        const oldNonCustom = oldActivities.filter(a => a.type !== 4);
+        const newNonCustom = newActivities.filter(a => a.type !== 4);
+
+        if (!deepEqual(oldNonCustom, newNonCustom)) {
+            changes.push('activities');
+        }
+
+        if (changes.length > 0) {
+            changes.forEach(changeType => {
+                debouncedSendUserData(userId, changeType);
+            });
+        } else {
+            debouncedSendUserData(userId);
+        }
     }
 });
 
@@ -310,21 +414,53 @@ client.on('userUpdate', (oldUser, newUser) => {
     const userId = newUser.id;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         userDataCache.delete(`user:${userId}`);
-        debouncedSendUserData(userId);
-    }
-});
 
-client.on('guildMemberUpdate', (oldMember, newMember) => {
-    if (newMember.guild.id !== GUILD_ID) return;
+        const changes = [];
 
-    const userId = newMember.id;
-    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        userDataCache.delete(`user:${userId}`);
-        debouncedSendUserData(userId);
+        if (oldUser.username !== newUser.username) {
+            changes.push('username');
+        }
+
+        if (oldUser.avatar !== newUser.avatar) {
+            changes.push('avatar');
+        }
+
+        if (oldUser.globalName !== newUser.globalName) {
+            changes.push('displayName');
+        }
+
+        if (changes.length > 0) {
+            changes.forEach(changeType => {
+                debouncedSendUserData(userId, changeType);
+            });
+        } else {
+            debouncedSendUserData(userId, 'all');
+        }
     }
 });
 
 const getActivityTypeName = (type) => ACTIVITY_TYPES[type] || 'Unknown';
+
+app.get('/', (req, res) => {
+    res.json({
+        name: 'Discord Presence API',
+        version: '1.0.0',
+        description: 'Discord bot API server that provides user status and activity information',
+        endpoints: {
+            health: '/health',
+            user: '/user/:userId'
+        },
+        websocket: {
+            events: {
+                subscribe: 'Subscribe to user updates with optional filters',
+                unsubscribe: 'Unsubscribe from user updates',
+                userUpdate: 'Receive user data updates',
+                error: 'Receive error messages'
+            },
+            updateTypes: ['all', 'status', 'avatar', 'username', 'activities', 'customStatus', 'displayName']
+        }
+    });
+});
 
 app.get('/user/:userId', async (req, res) => {
     const { userId } = req.params;
@@ -347,7 +483,7 @@ app.get('/user/:userId', async (req, res) => {
         const cacheKey = `user:${userId}`;
         const now = Date.now();
         const cached = userDataCache.get(cacheKey);
-        
+
         if (cached && (now - cached.timestamp) < CACHE_TTL) {
             return res.json(cached.data);
         }
@@ -358,7 +494,7 @@ app.get('/user/:userId', async (req, res) => {
         const presence = guild.presences.cache.get(userId);
 
         const response = formatUserData(user, member, presence);
-        
+
         userDataCache.set(cacheKey, {
             data: response,
             timestamp: now
@@ -368,14 +504,14 @@ app.get('/user/:userId', async (req, res) => {
 
     } catch (error) {
         console.error('Error fetching user:', error);
-        
+
         if (error.message === 'USER_NOT_FOUND') {
             return res.status(404).json({
                 error: 'Member not found in this guild',
                 details: 'User may not be a member of the specified guild'
             });
         }
-        
+
         res.status(500).json({
             error: 'User not found or error occurred',
             details: error.message
@@ -389,11 +525,11 @@ const HEALTH_CACHE_TTL = 30 * 1000;
 
 app.get('/health', (req, res) => {
     const now = Date.now();
-    
+
     if (healthDataCache && (now - healthCacheTimestamp) < HEALTH_CACHE_TTL) {
         return res.json(healthDataCache);
     }
-    
+
     const healthData = {
         status: 'online',
         botStatus: client.user?.presence?.status || 'offline',
@@ -408,7 +544,7 @@ app.get('/health', (req, res) => {
             total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
         }
     };
-    
+
     healthDataCache = healthData;
     healthCacheTimestamp = now;
 
