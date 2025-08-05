@@ -11,16 +11,29 @@ A lightweight Express.js server that exposes Discord user status and activity da
 
 ## API Endpoints
 
+### GET `/`
+
+Returns API information and available endpoints.
+
 ### WebSocket Connection
 
 Connect to `ws://localhost:3000` for real-time presence updates.
 
 **WebSocket Events:**
 
-- **Client → Server**: `subscribe(userId)` - Subscribe to user presence updates
+- **Client → Server**: `subscribe(userId)` or `subscribe({ userId, updateTypes })` - Subscribe to user presence updates with optional filtering
 - **Client → Server**: `unsubscribe()` - Unsubscribe from current user
 - **Server → Client**: `userUpdate(userData)` - Real-time user data updates
 - **Server → Client**: `error(message)` - Connection or validation errors
+
+**Update Types for Filtering:**
+- `all` - All updates (default)
+- `status` - Online status changes (online, idle, dnd, offline)
+- `avatar` - Profile picture changes
+- `username` - Username or global name changes  
+- `activities` - Activity changes (games, apps, etc.)
+- `customStatus` - Custom status message changes
+- `displayName` - Server display name changes
 
 ### GET `/user/:userId`
 
@@ -131,12 +144,19 @@ import io from 'socket.io-client';
 
 const socket = io('http://localhost:3000');
 
-// Subscribe to user presence updates
+// Subscribe to ALL user presence updates (legacy/default behavior)
 socket.emit('subscribe', '123456789012345678');
+
+// OR subscribe to specific types of updates only
+socket.emit('subscribe', {
+  userId: '123456789012345678',
+  updateTypes: ['status', 'activities'] // Only get status and activity changes
+});
 
 // Listen for real-time updates
 socket.on('userUpdate', (userData) => {
   console.log('User status updated:', userData);
+  console.log('Update type:', userData.updateType); // Will show what specifically changed
   // Update your UI with new data
 });
 
@@ -144,6 +164,28 @@ socket.on('userUpdate', (userData) => {
 socket.on('connect', () => console.log('Connected to Discord presence server'));
 socket.on('disconnect', () => console.log('Disconnected from server'));
 socket.on('error', (error) => console.error('WebSocket error:', error));
+```
+
+### Advanced Filtering Examples
+
+```javascript
+// Only get notified when user goes online/offline/idle/dnd
+socket.emit('subscribe', {
+  userId: '123456789012345678', 
+  updateTypes: ['status']
+});
+
+// Only get notified when user changes their profile picture
+socket.emit('subscribe', {
+  userId: '123456789012345678',
+  updateTypes: ['avatar']
+});
+
+// Get notified for multiple specific changes
+socket.emit('subscribe', {
+  userId: '123456789012345678',
+  updateTypes: ['status', 'customStatus', 'activities']
+});
 ```
 
 ## Example API Usage
