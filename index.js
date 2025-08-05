@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const compression = require('compression');
+const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { createServer } = require('http');
@@ -59,27 +60,37 @@ const client = new Client({
 const app = express();
 
 const server = createServer(app);
+
+const corsOriginCheck = (origin, callback) => {
+    if (!origin) return callback(null, true);
+    
+    if (origin.match(/^https?:\/\/localhost(:\d+)?$/)) {
+        return callback(null, true);
+    }
+    
+    if (process.env.CORS_ORIGIN) {
+        const allowedOrigins = process.env.CORS_ORIGIN.split(',').map(o => o.trim());
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+    }
+    
+    callback(new Error('Not allowed by CORS'));
+};
+
 const io = new Server(server, {
     cors: {
-        origin: (origin, callback) => {
-            if (!origin) return callback(null, true);
-            
-            if (origin.match(/^https?:\/\/localhost(:\d+)?$/)) {
-                return callback(null, true);
-            }
-            
-            if (process.env.CORS_ORIGIN) {
-                const allowedOrigins = process.env.CORS_ORIGIN.split(',').map(o => o.trim());
-                if (allowedOrigins.includes(origin)) {
-                    return callback(null, true);
-                }
-            }
-            
-            callback(new Error('Not allowed by CORS'));
-        },
+        origin: corsOriginCheck,
         methods: ["GET", "POST"]
     }
 });
+
+app.use(cors({
+    origin: corsOriginCheck,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: true
+}));
 
 const clientSubscriptions = new Map();
 const clientUpdateFilters = new Map();
