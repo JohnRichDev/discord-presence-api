@@ -61,7 +61,22 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+        origin: (origin, callback) => {
+            if (!origin) return callback(null, true);
+            
+            if (origin.match(/^https?:\/\/localhost(:\d+)?$/)) {
+                return callback(null, true);
+            }
+            
+            if (process.env.CORS_ORIGIN) {
+                const allowedOrigins = process.env.CORS_ORIGIN.split(',').map(o => o.trim());
+                if (allowedOrigins.includes(origin)) {
+                    return callback(null, true);
+                }
+            }
+            
+            callback(new Error('Not allowed by CORS'));
+        },
         methods: ["GET", "POST"]
     }
 });
