@@ -180,7 +180,7 @@ const getGuild = async () => {
     if (guildCache.has(GUILD_ID)) {
         return guildCache.get(GUILD_ID);
     }
-    
+
     const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
     guildCache.set(GUILD_ID, guild);
     return guild;
@@ -200,8 +200,7 @@ const getMember = async (guild, userId) => {
 const formatUserData = (user, member, presence) => {
     const userData = {
         username: user.username,
-        globalName: user.globalName,
-        displayName: member.displayName,
+        displayName: user.globalName,
         tag: user.tag,
         id: user.id,
         status: presence?.status || 'offline',
@@ -263,8 +262,8 @@ const sendUserData = async (userId, socket = null, updateType = null) => {
         const cacheKey = `user:${userId}`;
         const now = Date.now();
         const cached = userDataCache.get(cacheKey);
-        
-        if (cached && (now - cached.timestamp) < CACHE_TTL && !updateType) {
+
+        if (cached && (now - cached.timestamp) < CACHE_TTL) {
             if (socket) {
                 socket.emit('userUpdate', cached.data);
             } else {
@@ -272,8 +271,15 @@ const sendUserData = async (userId, socket = null, updateType = null) => {
                 if (room) {
                     room.forEach(socketId => {
                         const clientSocket = io.sockets.sockets.get(socketId);
-                        if (clientSocket) {
-                            clientSocket.emit('userUpdate', cached.data);
+                        const updateFilters = clientUpdateFilters.get(socketId);
+
+                        if (clientSocket && updateFilters) {
+                            if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
+                                clientSocket.emit('userUpdate', {
+                                    ...cached.data,
+                                    updateType: updateType || 'all'
+                                });
+                            }
                         }
                     });
                 }
@@ -287,7 +293,7 @@ const sendUserData = async (userId, socket = null, updateType = null) => {
         const presence = guild.presences.cache.get(userId);
 
         const userData = formatUserData(user, member, presence);
-        
+
         userDataCache.set(cacheKey, {
             data: userData,
             timestamp: now
@@ -301,9 +307,9 @@ const sendUserData = async (userId, socket = null, updateType = null) => {
                 room.forEach(socketId => {
                     const clientSocket = io.sockets.sockets.get(socketId);
                     const updateFilters = clientUpdateFilters.get(socketId);
-                    
+
                     if (clientSocket && updateFilters) {
-                        if (updateFilters.includes('all') || !updateType || updateFilters.includes(updateType)) {
+                        if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
                             clientSocket.emit('userUpdate', {
                                 ...userData,
                                 updateType: updateType || 'all'
@@ -342,12 +348,12 @@ const debouncedSendUserData = (userId, updateType = null) => {
     if (updateDebounceMap.has(key)) {
         clearTimeout(updateDebounceMap.get(key));
     }
-    
+
     const timeoutId = setTimeout(() => {
         sendUserData(userId, null, updateType);
         updateDebounceMap.delete(key);
     }, DEBOUNCE_DELAY);
-    
+
     updateDebounceMap.set(key, timeoutId);
 };
 
@@ -357,30 +363,30 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
     const userId = newPresence.userId;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         userDataCache.delete(`user:${userId}`);
-        
+
         const changes = [];
-        
+
         if (oldPresence?.status !== newPresence.status) {
             changes.push('status');
         }
-        
+
         const oldActivities = oldPresence?.activities || [];
         const newActivities = newPresence?.activities || [];
-        
+
         const oldCustomStatus = oldActivities.find(a => a.type === 4);
         const newCustomStatus = newActivities.find(a => a.type === 4);
-        
+
         if (JSON.stringify(oldCustomStatus) !== JSON.stringify(newCustomStatus)) {
             changes.push('customStatus');
         }
-        
+
         const oldNonCustom = oldActivities.filter(a => a.type !== 4);
         const newNonCustom = newActivities.filter(a => a.type !== 4);
-        
+
         if (JSON.stringify(oldNonCustom) !== JSON.stringify(newNonCustom)) {
             changes.push('activities');
         }
-        
+
         if (changes.length > 0) {
             changes.forEach(changeType => {
                 debouncedSendUserData(userId, changeType);
@@ -395,44 +401,21 @@ client.on('userUpdate', (oldUser, newUser) => {
     const userId = newUser.id;
     if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
         userDataCache.delete(`user:${userId}`);
-        
+
         const changes = [];
-        
+
         if (oldUser.username !== newUser.username) {
             changes.push('username');
         }
-        
+
         if (oldUser.avatar !== newUser.avatar) {
             changes.push('avatar');
         }
-        
+
         if (oldUser.globalName !== newUser.globalName) {
-            changes.push('username');
-        }
-        
-        if (changes.length > 0) {
-            changes.forEach(changeType => {
-                debouncedSendUserData(userId, changeType);
-            });
-        } else {
-            debouncedSendUserData(userId);
-        }
-    }
-});
-
-client.on('guildMemberUpdate', (oldMember, newMember) => {
-    if (newMember.guild.id !== GUILD_ID) return;
-
-    const userId = newMember.id;
-    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        userDataCache.delete(`user:${userId}`);
-        
-        const changes = [];
-        
-        if (oldMember.displayName !== newMember.displayName) {
             changes.push('displayName');
         }
-        
+
         if (changes.length > 0) {
             changes.forEach(changeType => {
                 debouncedSendUserData(userId, changeType);
@@ -487,7 +470,7 @@ app.get('/user/:userId', async (req, res) => {
         const cacheKey = `user:${userId}`;
         const now = Date.now();
         const cached = userDataCache.get(cacheKey);
-        
+
         if (cached && (now - cached.timestamp) < CACHE_TTL) {
             return res.json(cached.data);
         }
@@ -498,7 +481,7 @@ app.get('/user/:userId', async (req, res) => {
         const presence = guild.presences.cache.get(userId);
 
         const response = formatUserData(user, member, presence);
-        
+
         userDataCache.set(cacheKey, {
             data: response,
             timestamp: now
@@ -508,14 +491,14 @@ app.get('/user/:userId', async (req, res) => {
 
     } catch (error) {
         console.error('Error fetching user:', error);
-        
+
         if (error.message === 'USER_NOT_FOUND') {
             return res.status(404).json({
                 error: 'Member not found in this guild',
                 details: 'User may not be a member of the specified guild'
             });
         }
-        
+
         res.status(500).json({
             error: 'User not found or error occurred',
             details: error.message
@@ -529,11 +512,11 @@ const HEALTH_CACHE_TTL = 30 * 1000;
 
 app.get('/health', (req, res) => {
     const now = Date.now();
-    
+
     if (healthDataCache && (now - healthCacheTimestamp) < HEALTH_CACHE_TTL) {
         return res.json(healthDataCache);
     }
-    
+
     const healthData = {
         status: 'online',
         botStatus: client.user?.presence?.status || 'offline',
@@ -548,7 +531,7 @@ app.get('/health', (req, res) => {
             total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
         }
     };
-    
+
     healthDataCache = healthData;
     healthCacheTimestamp = now;
 
