@@ -20,6 +20,30 @@ const ACTIVITY_TYPES = {
     5: 'Competing in'
 };
 
+const deepEqual = (obj1, obj2) => {
+    if (obj1 === obj2) return true;
+
+    if (obj1 == null || obj2 == null) return obj1 === obj2;
+
+    if (typeof obj1 !== typeof obj2) return false;
+
+    if (typeof obj1 !== 'object') return obj1 === obj2;
+
+    if (Array.isArray(obj1) !== Array.isArray(obj2)) return false;
+
+    const keys1 = Object.keys(obj1);
+    const keys2 = Object.keys(obj2);
+
+    if (keys1.length !== keys2.length) return false;
+
+    for (const key of keys1) {
+        if (!keys2.includes(key)) return false;
+        if (!deepEqual(obj1[key], obj2[key])) return false;
+    }
+
+    return true;
+};
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -257,6 +281,25 @@ const formatUserData = (user, member, presence) => {
     return userData;
 };
 
+const emitToSubscribedClients = (userId, userData, updateType = null) => {
+    const room = io.sockets.adapter.rooms.get(`user:${userId}`);
+    if (room) {
+        room.forEach(socketId => {
+            const clientSocket = io.sockets.sockets.get(socketId);
+            const updateFilters = clientUpdateFilters.get(socketId);
+
+            if (clientSocket && updateFilters) {
+                if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
+                    clientSocket.emit('userUpdate', {
+                        ...userData,
+                        updateType: updateType || 'all'
+                    });
+                }
+            }
+        });
+    }
+};
+
 const sendUserData = async (userId, socket = null, updateType = null) => {
     try {
         const cacheKey = `user:${userId}`;
@@ -267,22 +310,7 @@ const sendUserData = async (userId, socket = null, updateType = null) => {
             if (socket) {
                 socket.emit('userUpdate', cached.data);
             } else {
-                const room = io.sockets.adapter.rooms.get(`user:${userId}`);
-                if (room) {
-                    room.forEach(socketId => {
-                        const clientSocket = io.sockets.sockets.get(socketId);
-                        const updateFilters = clientUpdateFilters.get(socketId);
-
-                        if (clientSocket && updateFilters) {
-                            if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
-                                clientSocket.emit('userUpdate', {
-                                    ...cached.data,
-                                    updateType: updateType || 'all'
-                                });
-                            }
-                        }
-                    });
-                }
+                emitToSubscribedClients(userId, cached.data, updateType);
             }
             return;
         }
@@ -302,22 +330,7 @@ const sendUserData = async (userId, socket = null, updateType = null) => {
         if (socket) {
             socket.emit('userUpdate', userData);
         } else {
-            const room = io.sockets.adapter.rooms.get(`user:${userId}`);
-            if (room) {
-                room.forEach(socketId => {
-                    const clientSocket = io.sockets.sockets.get(socketId);
-                    const updateFilters = clientUpdateFilters.get(socketId);
-
-                    if (clientSocket && updateFilters) {
-                        if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
-                            clientSocket.emit('userUpdate', {
-                                ...userData,
-                                updateType: updateType || 'all'
-                            });
-                        }
-                    }
-                });
-            }
+            emitToSubscribedClients(userId, userData, updateType);
         }
     } catch (error) {
         console.error(`Error sending user data for ${userId}:`, error.message);
@@ -376,14 +389,14 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
         const oldCustomStatus = oldActivities.find(a => a.type === 4);
         const newCustomStatus = newActivities.find(a => a.type === 4);
 
-        if (JSON.stringify(oldCustomStatus) !== JSON.stringify(newCustomStatus)) {
+        if (!deepEqual(oldCustomStatus, newCustomStatus)) {
             changes.push('customStatus');
         }
 
         const oldNonCustom = oldActivities.filter(a => a.type !== 4);
         const newNonCustom = newActivities.filter(a => a.type !== 4);
 
-        if (JSON.stringify(oldNonCustom) !== JSON.stringify(newNonCustom)) {
+        if (!deepEqual(oldNonCustom, newNonCustom)) {
             changes.push('activities');
         }
 
@@ -421,7 +434,7 @@ client.on('userUpdate', (oldUser, newUser) => {
                 debouncedSendUserData(userId, changeType);
             });
         } else {
-            debouncedSendUserData(userId);
+            debouncedSendUserData(userId, 'all');
         }
     }
 });
