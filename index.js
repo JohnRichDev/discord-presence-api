@@ -62,20 +62,7 @@ const app = express();
 const server = createServer(app);
 
 const corsOriginCheck = (origin, callback) => {
-    if (!origin) return callback(null, true);
-    
-    if (origin.match(/^https?:\/\/localhost(:\d+)?$/)) {
-        return callback(null, true);
-    }
-    
-    if (process.env.CORS_ORIGIN) {
-        const allowedOrigins = process.env.CORS_ORIGIN.split(',').map(o => o.trim());
-        if (allowedOrigins.includes(origin)) {
-            return callback(null, true);
-        }
-    }
-    
-    callback(new Error('Not allowed by CORS'));
+    callback(null, true);
 };
 
 const io = new Server(server, {
