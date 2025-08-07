@@ -6,8 +6,22 @@ A lightweight Express.js server that exposes Discord user status and activity da
 
 - Retrieve detailed Discord user presence and activity information
 - Real-time WebSocket connections for instant presence updates
+- Real-time activity-specific subscriptions (e.g., Spotify updates)
 - Health check endpoint for monitoring server and bot status
 - Subscription-based user monitoring system
+
+## Using the Hosted Version
+
+**Want to use the API without hosting it yourself?**
+
+Join [**The Grid**](https://discord.gg/rA4FWtn9yZ) Discord server to access the hosted version of this API! 
+
+Once you're a member of The Grid, you can use the hosted API to get presence data for any user in that server. This is perfect for:
+- Testing the API before self-hosting
+- Small projects that don't need a dedicated instance
+- Learning how the WebSocket integration works
+
+> **Note**: The hosted version only provides data for users who are members of The Grid Discord server.
 
 ## API Endpoints
 
@@ -22,8 +36,10 @@ Connect to `ws://localhost:3000` for real-time presence updates.
 **WebSocket Events:**
 
 - **Client → Server**: `subscribe(userId)` or `subscribe({ userId, updateTypes })` - Subscribe to user presence updates with optional filtering
+- **Client → Server**: `subscribeActivity({ userId, activityName, activityType })` - Subscribe to specific activity updates (e.g., Spotify)
 - **Client → Server**: `unsubscribe()` - Unsubscribe from current user
 - **Server → Client**: `userUpdate(userData)` - Real-time user data updates
+- **Server → Client**: `activityUpdate(activityData)` - Real-time activity-specific updates
 - **Server → Client**: `error(message)` - Connection or validation errors
 
 **Update Types for Filtering:**
@@ -187,6 +203,49 @@ socket.emit('subscribe', {
   updateTypes: ['status', 'customStatus', 'activities']
 });
 ```
+
+### Activity-Specific Subscriptions
+
+Subscribe to specific activities like Spotify, games, or any application:
+
+```javascript
+// Subscribe to Spotify updates only
+socket.emit('subscribeActivity', {
+  userId: '123456789012345678',
+  activityName: 'Spotify'
+});
+
+// Subscribe to all listening activities (type 2)
+socket.emit('subscribeActivity', {
+  userId: '123456789012345678',
+  activityType: 2
+});
+
+// Subscribe to all gaming activities (type 0)
+socket.emit('subscribeActivity', {
+  userId: '123456789012345678',
+  activityType: 0
+});
+
+// Listen for activity-specific updates
+socket.on('activityUpdate', (activityData) => {
+  console.log('Activity update:', activityData);
+  // activityData contains: userId, username, displayName, status, activities[], timestamp
+  
+  if (activityData.activities.length > 0) {
+    console.log('Current activities:', activityData.activities);
+  } else {
+    console.log('No matching activities found');
+  }
+});
+```
+
+**Activity Types:**
+- `0` - Playing (games, applications)
+- `1` - Streaming
+- `2` - Listening to (Spotify, music)
+- `3` - Watching (videos, streams)
+- `5` - Competing in (tournaments, competitions)
 
 ## Example API Usage
 
