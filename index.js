@@ -193,6 +193,58 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('subscribeActivity', async (data) => {
+        const { userId, activityName, activityType } = data;
+
+        if (!userId || !/^\d{17,19}$/.test(userId)) {
+            socket.emit('error', {
+                message: 'Invalid user ID format',
+                code: 'INVALID_FORMAT',
+                userId: userId
+            });
+            return;
+        }
+
+        if (!activityName && activityType === undefined) {
+            socket.emit('error', {
+                message: 'Either activityName or activityType must be specified',
+                code: 'INVALID_ACTIVITY_FILTER'
+            });
+            return;
+        }
+
+        try {
+            const subscriptionKey = `${userId}:${activityName || `type:${activityType}`}`;
+            clientSubscriptions.set(socket.id, subscriptionKey);
+            clientUpdateFilters.set(socket.id, {
+                userId,
+                activityName,
+                activityType,
+                type: 'activity'
+            });
+
+            socket.join(`activity:${subscriptionKey}`);
+            console.log(`Client ${socket.id} subscribed to activity updates for user ${userId} - ${activityName || `type ${activityType}`}`);
+
+            sendActivityData(userId, socket, activityName, activityType);
+        } catch (error) {
+            if (error.message === 'USER_NOT_FOUND') {
+                socket.emit('error', {
+                    message: 'User not found in this guild',
+                    code: 'USER_NOT_FOUND',
+                    userId: userId
+                });
+            } else {
+                socket.emit('error', {
+                    message: 'Failed to validate user',
+                    code: 'VALIDATION_ERROR',
+                    userId: userId
+                });
+            }
+            console.error(`Failed to subscribe client ${socket.id} to activity updates for user ${userId}:`, error.message);
+        }
+    });
+
     socket.on('unsubscribe', () => {
         const userId = clientSubscriptions.get(socket.id);
         if (userId) {
@@ -204,12 +256,20 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        const userId = clientSubscriptions.get(socket.id);
-        if (userId) {
+        const subscription = clientSubscriptions.get(socket.id);
+        const filter = clientUpdateFilters.get(socket.id);
+
+        if (subscription) {
+            if (filter && filter.type === 'activity') {
+                console.log(`Client disconnected: ${socket.id} (was subscribed to activity updates)`);
+            } else {
+                console.log(`Client disconnected: ${socket.id}`);
+            }
             clientSubscriptions.delete(socket.id);
             clientUpdateFilters.delete(socket.id);
+        } else {
+            console.log(`Client disconnected: ${socket.id}`);
         }
-        console.log(`Client disconnected: ${socket.id}`);
     });
 });
 
@@ -313,6 +373,83 @@ const emitToSubscribedClients = (userId, userData, updateType = null) => {
     }
 };
 
+const sendActivityData = async (userId, socket = null, activityName = null, activityType = null) => {
+    try {
+        const cacheKey = `user:${userId}`;
+        const now = Date.now();
+        const cached = userDataCache.get(cacheKey);
+
+        let userData;
+        if (cached && (now - cached.timestamp) < CACHE_TTL) {
+            userData = cached.data;
+        } else {
+            const guild = await getGuild();
+            const member = await getMember(guild, userId);
+            const user = member.user;
+            const presence = guild.presences.cache.get(userId);
+            userData = formatUserData(user, member, presence);
+        }
+
+        let filteredActivities = userData.activities;
+        if (activityName) {
+            filteredActivities = userData.activities.filter(activity =>
+                activity.name.toLowerCase() === activityName.toLowerCase()
+            );
+        } else if (activityType !== undefined) {
+            filteredActivities = userData.activities.filter(activity =>
+                activity.type === activityType
+            );
+        }
+
+        const activityData = {
+            userId: userData.id,
+            username: userData.username,
+            displayName: userData.displayName,
+            status: userData.status,
+            activities: filteredActivities,
+            timestamp: Date.now()
+        };
+
+        if (socket) {
+            socket.emit('activityUpdate', activityData);
+        } else {
+            emitToActivitySubscribers(userId, activityData, activityName, activityType);
+        }
+    } catch (error) {
+        console.error(`Error sending activity data for ${userId}:`, error.message);
+
+        if (socket) {
+            if (error.message === 'USER_NOT_FOUND') {
+                socket.emit('error', {
+                    message: 'User not found in this guild',
+                    code: 'USER_NOT_FOUND',
+                    userId: userId
+                });
+            } else {
+                socket.emit('error', {
+                    message: 'Failed to fetch activity data',
+                    code: 'FETCH_ERROR',
+                    userId: userId
+                });
+            }
+        }
+    }
+};
+
+const emitToActivitySubscribers = (userId, activityData, activityName = null, activityType = null) => {
+    const subscriptionKey = `${userId}:${activityName || `type:${activityType}`}`;
+    const room = io.sockets.adapter.rooms.get(`activity:${subscriptionKey}`);
+
+    if (room) {
+        room.forEach(socketId => {
+            const clientSocket = io.sockets.sockets.get(socketId);
+            if (clientSocket) {
+                clientSocket.emit('activityUpdate', activityData);
+            }
+        });
+    }
+};
+
 const sendUserData = async (userId, socket = null, updateType = null) => {
     try {
         const cacheKey = `user:${userId}`;
@@ -383,6 +520,20 @@ const debouncedSendUserData = (userId, updateType = null) => {
     updateDebounceMap.set(key, timeoutId);
 };
 
+const debouncedSendActivityData = (userId, activityName = null, activityType = null) => {
+    const key = `activity:${userId}:${activityName || `type:${activityType}`}`;
+    if (updateDebounceMap.has(key)) {
+        clearTimeout(updateDebounceMap.get(key));
+    }
+
+    const timeoutId = setTimeout(() => {
+        sendActivityData(userId, null, activityName, activityType);
+        updateDebounceMap.delete(key);
+    }, DEBOUNCE_DELAY);
+
+    updateDebounceMap.set(key, timeoutId);
+};
+
 client.on('presenceUpdate', (oldPresence, newPresence) => {
     if (!newPresence || newPresence.guild.id !== GUILD_ID) return;
 
@@ -420,6 +571,48 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
         } else {
             debouncedSendUserData(userId);
         }
+    }
+
+    if (!deepEqual(oldPresence?.activities || [], newPresence?.activities || [])) {
+        const nonCustomOldActivities = (oldPresence?.activities || []).filter(a => a.type !== 4);
+        const nonCustomNewActivities = (newPresence?.activities || []).filter(a => a.type !== 4);
+
+        const oldSpotify = nonCustomOldActivities.find(a => a.name === 'Spotify');
+        const newSpotify = nonCustomNewActivities.find(a => a.name === 'Spotify');
+
+        if (!deepEqual(oldSpotify, newSpotify)) {
+            debouncedSendActivityData(userId, 'Spotify');
+        }
+
+        const allActivityNames = new Set([
+            ...nonCustomOldActivities.map(a => a.name),
+            ...nonCustomNewActivities.map(a => a.name)
+        ]);
+
+        allActivityNames.forEach(activityName => {
+            if (activityName !== 'Spotify') {
+                const oldActivity = nonCustomOldActivities.find(a => a.name === activityName);
+                const newActivity = nonCustomNewActivities.find(a => a.name === activityName);
+
+                if (!deepEqual(oldActivity, newActivity)) {
+                    debouncedSendActivityData(userId, activityName);
+                }
+            }
+        });
+
+        const allActivityTypes = new Set([
+            ...nonCustomOldActivities.map(a => a.type),
+            ...nonCustomNewActivities.map(a => a.type)
+        ]);
+
+        allActivityTypes.forEach(activityType => {
+            const oldActivitiesOfType = nonCustomOldActivities.filter(a => a.type === activityType);
+            const newActivitiesOfType = nonCustomNewActivities.filter(a => a.type === activityType);
+
+            if (!deepEqual(oldActivitiesOfType, newActivitiesOfType)) {
+                debouncedSendActivityData(userId, null, activityType);
+            }
+        });
     }
 });
 
@@ -466,11 +659,31 @@ app.get('/', (req, res) => {
         websocket: {
             events: {
                 subscribe: 'Subscribe to user updates with optional filters',
+                subscribeActivity: 'Subscribe to specific activity updates (e.g., Spotify)',
                 unsubscribe: 'Unsubscribe from user updates',
                 userUpdate: 'Receive user data updates',
+                activityUpdate: 'Receive activity-specific updates',
                 error: 'Receive error messages'
             },
-            updateTypes: ['all', 'status', 'avatar', 'username', 'activities', 'customStatus', 'displayName']
+            updateTypes: ['all', 'status', 'avatar', 'username', 'activities', 'customStatus', 'displayName'],
+            activitySubscription: {
+                description: 'Subscribe to specific activity updates',
+                parameters: {
+                    userId: 'Discord user ID (required)',
+                    activityName: 'Name of the activity to monitor (e.g., "Spotify")',
+                    activityType: 'Type of activity to monitor (0=Playing, 1=Streaming, 2=Listening, 3=Watching, 5=Competing)'
+                },
+                examples: [
+                    {
+                        description: 'Subscribe to Spotify updates',
+                        data: { userId: '123456789012345678', activityName: 'Spotify' }
+                    },
+                    {
+                        description: 'Subscribe to all listening activities',
+                        data: { userId: '123456789012345678', activityType: 2 }
+                    }
+                ]
+            }
         }
     });
 });
