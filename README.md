@@ -14,7 +14,7 @@ A lightweight Express.js server that exposes Discord user status and activity da
 
 **Want to use the API without hosting it yourself?**
 
-Join [**The Grid**](https://discord.gg/rA4FWtn9yZ) Discord server to access the hosted version of this API! 
+Join [**The Grid**](https://discord.gg/rA4FWtn9yZ) Discord server to access the hosted version of this API at **https://discord-presence-api.johnrich.dev**! 
 
 Once you're a member of The Grid, you can use the hosted API to get presence data for any user in that server. This is perfect for:
 - Testing the API before self-hosting
