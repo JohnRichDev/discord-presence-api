@@ -46,7 +46,7 @@ Connect to `ws://localhost:3000` for real-time presence updates.
 - `all` - All updates (default)
 - `status` - Online status changes (online, idle, dnd, offline)
 - `avatar` - Profile picture changes
-- `username` - Username or global name changes  
+- `username` - Username changes  
 - `activities` - Activity changes (games, apps, etc.)
 - `customStatus` - Custom status message changes
 - `displayName` - Server display name changes
@@ -57,7 +57,7 @@ Returns presence and activity data for the specified Discord user.
 
 **Response includes:**
 
-- Username, display name, and tag
+- Username and display name
 - Online status (online, idle, dnd, offline)
 - Avatar and image URLs
 - Active applications or activities
@@ -259,7 +259,6 @@ curl http://localhost:3000/user/123456789012345678
 ```json
 {
   "username": "johnrich",
-  "globalName": "John Rich",
   "displayName": "John Rich",
   "tag": "johnrich",
   "id": "150471906536062976",
