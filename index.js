@@ -538,39 +538,37 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
     if (!newPresence || newPresence.guild.id !== GUILD_ID) return;
 
     const userId = newPresence.userId;
-    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        userDataCache.delete(`user:${userId}`);
+    userDataCache.delete(`user:${userId}`);
 
-        const changes = [];
+    const changes = [];
 
-        if (oldPresence?.status !== newPresence.status) {
-            changes.push('status');
-        }
+    if (oldPresence?.status !== newPresence.status) {
+        changes.push('status');
+    }
 
-        const oldActivities = oldPresence?.activities || [];
-        const newActivities = newPresence?.activities || [];
+    const oldActivities = oldPresence?.activities || [];
+    const newActivities = newPresence?.activities || [];
 
-        const oldCustomStatus = oldActivities.find(a => a.type === 4);
-        const newCustomStatus = newActivities.find(a => a.type === 4);
+    const oldCustomStatus = oldActivities.find(a => a.type === 4);
+    const newCustomStatus = newActivities.find(a => a.type === 4);
 
-        if (!deepEqual(oldCustomStatus, newCustomStatus)) {
-            changes.push('customStatus');
-        }
+    if (!deepEqual(oldCustomStatus, newCustomStatus)) {
+        changes.push('customStatus');
+    }
 
-        const oldNonCustom = oldActivities.filter(a => a.type !== 4);
-        const newNonCustom = newActivities.filter(a => a.type !== 4);
+    const oldNonCustom = oldActivities.filter(a => a.type !== 4);
+    const newNonCustom = newActivities.filter(a => a.type !== 4);
 
-        if (!deepEqual(oldNonCustom, newNonCustom)) {
-            changes.push('activities');
-        }
+    if (!deepEqual(oldNonCustom, newNonCustom)) {
+        changes.push('activities');
+    }
 
-        if (changes.length > 0) {
-            changes.forEach(changeType => {
-                debouncedSendUserData(userId, changeType);
-            });
-        } else {
-            debouncedSendUserData(userId);
-        }
+    if (changes.length > 0) {
+        changes.forEach(changeType => {
+            debouncedSendUserData(userId, changeType);
+        });
+    } else {
+        debouncedSendUserData(userId);
     }
 
     if (!deepEqual(oldPresence?.activities || [], newPresence?.activities || [])) {
@@ -618,30 +616,28 @@ client.on('presenceUpdate', (oldPresence, newPresence) => {
 
 client.on('userUpdate', (oldUser, newUser) => {
     const userId = newUser.id;
-    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size > 0) {
-        userDataCache.delete(`user:${userId}`);
+    userDataCache.delete(`user:${userId}`);
 
-        const changes = [];
+    const changes = [];
 
-        if (oldUser.username !== newUser.username) {
-            changes.push('username');
-        }
+    if (oldUser.username !== newUser.username) {
+        changes.push('username');
+    }
 
-        if (oldUser.avatar !== newUser.avatar) {
-            changes.push('avatar');
-        }
+    if (oldUser.avatar !== newUser.avatar) {
+        changes.push('avatar');
+    }
 
-        if (oldUser.globalName !== newUser.globalName) {
-            changes.push('displayName');
-        }
+    if (oldUser.globalName !== newUser.globalName) {
+        changes.push('displayName');
+    }
 
-        if (changes.length > 0) {
-            changes.forEach(changeType => {
-                debouncedSendUserData(userId, changeType);
-            });
-        } else {
-            debouncedSendUserData(userId, 'all');
-        }
+    if (changes.length > 0) {
+        changes.forEach(changeType => {
+            debouncedSendUserData(userId, changeType);
+        });
+    } else {
+        debouncedSendUserData(userId, 'all');
     }
 });
 
