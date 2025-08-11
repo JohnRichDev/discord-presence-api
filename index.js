@@ -1,3 +1,76 @@
+const { REST, Routes, SlashCommandBuilder, InteractionType } = require('discord.js');
+
+const commands = [
+    new SlashCommandBuilder().setName('opt-out').setDescription('Opt out of the Discord Presence API'),
+    new SlashCommandBuilder().setName('opt-in').setDescription('Opt in to the Discord Presence API'),
+];
+
+async function registerCommands() {
+    if (!process.env.DISCORD_BOT_TOKEN || !process.env.CLIENT_ID) {
+        console.error('Missing DISCORD_BOT_TOKEN or CLIENT_ID. Skipping slash commands registration.');
+        return;
+    }
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
+    try {
+        if (GUILD_ID) {
+            await rest.put(
+                Routes.applicationGuildCommands(process.env.CLIENT_ID, GUILD_ID),
+                { body: commands.map(cmd => cmd.toJSON()) }
+            );
+            console.log('Slash guild commands registered.');
+        } else {
+            await rest.put(
+                Routes.applicationCommands(process.env.CLIENT_ID),
+                { body: commands.map(cmd => cmd.toJSON()) }
+            );
+            console.log('Global slash commands registered.');
+        }
+    } catch (err) {
+        console.error('Failed to register slash commands:', err);
+    }
+}
+
+const fs = require('fs');
+const path = require('path');
+
+const OPTOUT_PATH = path.join(__dirname, 'optout.json');
+
+function ensureOptOutFile() {
+    if (!fs.existsSync(OPTOUT_PATH)) {
+        fs.writeFileSync(OPTOUT_PATH, '[]');
+    }
+}
+
+function loadOptOutList() {
+    ensureOptOutFile();
+    try {
+        return new Set(JSON.parse(fs.readFileSync(OPTOUT_PATH, 'utf8')));
+    } catch (e) {
+        return new Set();
+    }
+}
+
+function saveOptOutList(optOutSet) {
+    ensureOptOutFile();
+    fs.writeFileSync(OPTOUT_PATH, JSON.stringify([...optOutSet], null, 2));
+}
+
+let optOutSet = loadOptOutList();
+
+function isOptedOut(userId) {
+    return optOutSet.has(userId);
+}
+
+function optOutUser(userId) {
+    optOutSet.add(userId);
+    saveOptOutList(optOutSet);
+}
+
+function optInUser(userId) {
+    optOutSet.delete(userId);
+    saveOptOutList(optOutSet);
+}
+
 require('dotenv').config();
 const express = require('express');
 const compression = require('compression');
@@ -55,6 +128,10 @@ const client = new Client({
         Partials.User,
         Partials.GuildMember
     ]
+});
+
+client.once('ready', async () => {
+    await registerCommands();
 });
 
 const app = express();
@@ -125,6 +202,17 @@ client.once('ready', () => {
     console.log('Bot is ready!');
 });
 
+typeof client.on === 'function' && client.on('interactionCreate', async (interaction) => {
+    if (interaction.type !== InteractionType.ApplicationCommand) return;
+    if (interaction.commandName === 'opt-out') {
+        optOutUser(interaction.user.id);
+        await interaction.reply({ content: 'You have opted out of the Discord Presence API. Your presence/activity will no longer be shared.', ephemeral: true });
+    } else if (interaction.commandName === 'opt-in') {
+        optInUser(interaction.user.id);
+        await interaction.reply({ content: 'You have opted in to the Discord Presence API. Your presence/activity will be shared again.', ephemeral: true });
+    }
+});
+
 io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
 
@@ -149,6 +237,15 @@ io.on('connection', (socket) => {
             socket.emit('error', {
                 message: 'Invalid user ID format',
                 code: 'INVALID_FORMAT',
+                userId: userId
+            });
+            return;
+        }
+
+        if (isOptedOut(userId)) {
+            socket.emit('error', {
+                message: 'This user has opted out of API exposure.',
+                code: 'USER_OPTED_OUT',
                 userId: userId
             });
             return;
@@ -355,12 +452,12 @@ const formatUserData = (user, member, presence) => {
 };
 
 const emitToSubscribedClients = (userId, userData, updateType = null) => {
+    if (isOptedOut(userId)) return;
     const room = io.sockets.adapter.rooms.get(`user:${userId}`);
     if (room) {
         room.forEach(socketId => {
             const clientSocket = io.sockets.sockets.get(socketId);
             const updateFilters = clientUpdateFilters.get(socketId);
-
             if (clientSocket && updateFilters) {
                 if (updateFilters.includes('all') || (updateType && updateFilters.includes(updateType))) {
                     clientSocket.emit('userUpdate', {
@@ -687,10 +784,18 @@ app.get('/', (req, res) => {
 app.get('/user/:userId', async (req, res) => {
     const { userId } = req.params;
 
+
     if (!/^\d{17,19}$/.test(userId)) {
         return res.status(400).json({
             error: 'Invalid user ID format',
             details: 'User ID must be a valid Discord snowflake (17-19 digits)'
+        });
+    }
+
+    if (isOptedOut(userId)) {
+        return res.status(403).json({
+            error: 'User has opted out of API exposure',
+            details: 'This user has chosen not to share their presence/activity via the API.'
         });
     }
 
