@@ -9,6 +9,7 @@ A lightweight Express.js server that exposes Discord user status and activity da
 - Real-time activity-specific subscriptions (e.g., Spotify updates)
 - Health check endpoint for monitoring server and bot status
 - Subscription-based user monitoring system
+- User privacy controls with opt-in/opt-out slash commands
 
 ## Using the Hosted Version
 
@@ -21,7 +22,25 @@ Once you're a member of The Grid, you can use the hosted API to get presence dat
 - Small projects that don't need a dedicated instance
 - Learning how the WebSocket integration works
 
-> **Note**: The hosted version only provides data for users who are members of The Grid Discord server.
+> **Note**: The hosted version only provides data for users who are members of The Grid Discord server and have not opted out of presence sharing using the `/opt-out` command.
+
+## Privacy Controls
+
+The API includes built-in privacy controls that allow users to control whether their presence data is shared through the API.
+
+### Slash Commands
+
+**Available Commands:**
+
+- `/opt-out` - Prevents your presence data from being shared through the API
+- `/opt-in` - Allows your presence data to be shared through the API again (default state)
+
+When a user opts out:
+- API requests for their user data will return a privacy message instead of their actual presence
+- WebSocket subscribers will not receive updates for that user
+- The user's data is completely filtered from all API responses
+
+**Note**: Users are opted in by default when the bot first starts. The opt-out status persists across bot restarts and is stored in a local `optout.json` file.
 
 ## API Endpoints
 
@@ -107,6 +126,7 @@ Returns current status of the API server and bot.
    ```env
    DISCORD_BOT_TOKEN=your_discord_bot_token_here
    GUILD_ID=your_server_id_here
+   CLIENT_ID=your_discord_application_id_here
    PORT=3000
    ```
 
@@ -116,13 +136,14 @@ Returns current status of the API server and bot.
 2. Create a new application
 3. Navigate to the **Bot** section
 4. Click **Reset Token** and copy the token
-5. Invite the bot to your server with required permissions
+5. Copy the **Application ID** from the General Information tab (this is your CLIENT_ID)
+6. Invite the bot to your server with required permissions
 
 ### Required Bot Permissions
 
 - View Channels
 - Read Message History
-- Use Slash Commands (optional)
+- Use Slash Commands
 
 ### Required Bot Intents
 
@@ -342,6 +363,7 @@ curl http://localhost:3000/health
 ### REST API Errors
 
 - `404 Not Found`: User not found in the guild
+- `403 Forbidden`: User has opted out of presence sharing
 - `500 Internal Server Error`: Unexpected server error
 - `503 Service Unavailable`: Bot is not connected or not ready
 
@@ -349,6 +371,7 @@ curl http://localhost:3000/health
 
 - **Invalid User ID**: WebSocket will emit error event with validation message
 - **User Not Found**: Bot cannot find user in the configured guild
+- **User Opted Out**: User has disabled presence sharing through opt-out command
 - **Connection Lost**: Client should implement reconnection logic
 - **CORS Issues**: Ensure `CORS_ORIGIN` environment variable includes your domain
 
