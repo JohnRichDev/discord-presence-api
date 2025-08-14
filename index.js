@@ -1,34 +1,4 @@
-const { REST, Routes, SlashCommandBuilder, InteractionType } = require('discord.js');
-
-const commands = [
-    new SlashCommandBuilder().setName('opt-out').setDescription('Opt out of the Discord Presence API'),
-    new SlashCommandBuilder().setName('opt-in').setDescription('Opt in to the Discord Presence API'),
-];
-
-async function registerCommands() {
-    if (!process.env.DISCORD_BOT_TOKEN || !process.env.CLIENT_ID) {
-        console.error('Missing DISCORD_BOT_TOKEN or CLIENT_ID. Skipping slash commands registration.');
-        return;
-    }
-    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
-    try {
-        if (GUILD_ID) {
-            await rest.put(
-                Routes.applicationGuildCommands(process.env.CLIENT_ID, GUILD_ID),
-                { body: commands.map(cmd => cmd.toJSON()) }
-            );
-            console.log('Slash guild commands registered.');
-        } else {
-            await rest.put(
-                Routes.applicationCommands(process.env.CLIENT_ID),
-                { body: commands.map(cmd => cmd.toJSON()) }
-            );
-            console.log('Global slash commands registered.');
-        }
-    } catch (err) {
-        console.error('Failed to register slash commands:', err);
-    }
-}
+const { setupDiscordHandlers } = require('./discord');
 
 const fs = require('fs');
 const path = require('path');
@@ -129,10 +99,6 @@ const client = new Client({
     ]
 });
 
-client.once('ready', async () => {
-    await registerCommands();
-});
-
 const app = express();
 
 const server = createServer(app);
@@ -180,24 +146,6 @@ if (process.env.NODE_ENV !== 'production') {
         next();
     });
 }
-
-client.once('ready', () => {
-    console.log(`Bot logged in as ${client.user.tag}`);
-    console.log(`Connected to ${client.guilds.cache.size} guild(s)`);
-    console.log(`Cached ${client.users.cache.size} user(s)`);
-    console.log('Bot is ready!');
-});
-
-typeof client.on === 'function' && client.on('interactionCreate', async (interaction) => {
-    if (interaction.type !== InteractionType.ApplicationCommand) return;
-    if (interaction.commandName === 'opt-out') {
-        optOutUser(interaction.user.id);
-        await interaction.reply({ content: 'You have opted out of the Discord Presence API. Your presence/activity will no longer be shared.', ephemeral: true });
-    } else if (interaction.commandName === 'opt-in') {
-        optInUser(interaction.user.id);
-        await interaction.reply({ content: 'You have opted in to the Discord Presence API. Your presence/activity will be shared again.', ephemeral: true });
-    }
-});
 
 io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
@@ -617,113 +565,6 @@ const debouncedSendActivityData = (userId, activityName = null, activityType = n
     updateDebounceMap.set(key, timeoutId);
 };
 
-client.on('presenceUpdate', (oldPresence, newPresence) => {
-    if (!newPresence || newPresence.guild.id !== GUILD_ID) return;
-
-    const userId = newPresence.userId;
-    userDataCache.delete(`user:${userId}`);
-
-    const changes = [];
-
-    if (oldPresence?.status !== newPresence.status) {
-        changes.push('status');
-    }
-
-    const oldActivities = oldPresence?.activities || [];
-    const newActivities = newPresence?.activities || [];
-
-    const oldCustomStatus = oldActivities.find(a => a.type === 4);
-    const newCustomStatus = newActivities.find(a => a.type === 4);
-
-    if (!deepEqual(oldCustomStatus, newCustomStatus)) {
-        changes.push('customStatus');
-    }
-
-    const oldNonCustom = oldActivities.filter(a => a.type !== 4);
-    const newNonCustom = newActivities.filter(a => a.type !== 4);
-
-    if (!deepEqual(oldNonCustom, newNonCustom)) {
-        changes.push('activities');
-    }
-
-    if (changes.length > 0) {
-        changes.forEach(changeType => {
-            debouncedSendUserData(userId, changeType);
-        });
-    } else {
-        debouncedSendUserData(userId);
-    }
-
-    if (!deepEqual(oldPresence?.activities || [], newPresence?.activities || [])) {
-        const nonCustomOldActivities = (oldPresence?.activities || []).filter(a => a.type !== 4);
-        const nonCustomNewActivities = (newPresence?.activities || []).filter(a => a.type !== 4);
-
-        const oldSpotify = nonCustomOldActivities.find(a => a.name === 'Spotify');
-        const newSpotify = nonCustomNewActivities.find(a => a.name === 'Spotify');
-
-        if (!deepEqual(oldSpotify, newSpotify)) {
-            debouncedSendActivityData(userId, 'Spotify');
-        }
-
-        const allActivityNames = new Set([
-            ...nonCustomOldActivities.map(a => a.name),
-            ...nonCustomNewActivities.map(a => a.name)
-        ]);
-
-        allActivityNames.forEach(activityName => {
-            if (activityName !== 'Spotify') {
-                const oldActivity = nonCustomOldActivities.find(a => a.name === activityName);
-                const newActivity = nonCustomNewActivities.find(a => a.name === activityName);
-
-                if (!deepEqual(oldActivity, newActivity)) {
-                    debouncedSendActivityData(userId, activityName);
-                }
-            }
-        });
-
-        const allActivityTypes = new Set([
-            ...nonCustomOldActivities.map(a => a.type),
-            ...nonCustomNewActivities.map(a => a.type)
-        ]);
-
-        allActivityTypes.forEach(activityType => {
-            const oldActivitiesOfType = nonCustomOldActivities.filter(a => a.type === activityType);
-            const newActivitiesOfType = nonCustomNewActivities.filter(a => a.type === activityType);
-
-            if (!deepEqual(oldActivitiesOfType, newActivitiesOfType)) {
-                debouncedSendActivityData(userId, null, activityType);
-            }
-        });
-    }
-});
-
-client.on('userUpdate', (oldUser, newUser) => {
-    const userId = newUser.id;
-    userDataCache.delete(`user:${userId}`);
-
-    const changes = [];
-
-    if (oldUser.username !== newUser.username) {
-        changes.push('username');
-    }
-
-    if (oldUser.avatar !== newUser.avatar) {
-        changes.push('avatar');
-    }
-
-    if (oldUser.globalName !== newUser.globalName) {
-        changes.push('displayName');
-    }
-
-    if (changes.length > 0) {
-        changes.forEach(changeType => {
-            debouncedSendUserData(userId, changeType);
-        });
-    } else {
-        debouncedSendUserData(userId, 'all');
-    }
-});
-
 const getActivityTypeName = (type) => ACTIVITY_TYPES[type] || 'Unknown';
 
 const initializeRoutes = require('./routes');
@@ -740,20 +581,16 @@ const routesDeps = {
 
 app.use(initializeRoutes(routesDeps));
 
-client.on('error', error => {
-    console.error('Discord client error:', error);
-});
-
-client.on('invalidated', () => {
-    console.error('Session invalidated! Bot token may be invalid.');
-});
-
-client.on('disconnect', () => {
-    console.warn('Disconnected from Discord');
-});
-
-client.on('reconnecting', () => {
-    console.log('Reconnecting to Discord...');
+setupDiscordHandlers(client, {
+    clientId: process.env.CLIENT_ID,
+    guildId: GUILD_ID,
+    botToken: process.env.DISCORD_BOT_TOKEN,
+    optOutUser,
+    optInUser,
+    userDataCache,
+    debouncedSendUserData,
+    debouncedSendActivityData,
+    deepEqual
 });
 
 const gracefulShutdown = () => {

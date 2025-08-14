@@ -9,3 +9,6 @@ package-lock.json
 
 # .vscode
 .vscode
+
+# optout.json
+optout.json
