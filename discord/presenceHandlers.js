@@ -36,7 +36,7 @@ function setupPresenceHandlers(client, guildId, userDataCache, debouncedSendUser
             debouncedSendUserData(userId);
         }
 
-        if (!deepEqual(oldPresence?.activities || [], newPresence?.activities || [])) {
+        if (changes.includes('activities')) {
             const nonCustomOldActivities = (oldPresence?.activities || []).filter(a => a.type !== 4);
             const nonCustomNewActivities = (newPresence?.activities || []).filter(a => a.type !== 4);
 
